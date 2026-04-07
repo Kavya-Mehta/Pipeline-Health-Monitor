@@ -3,6 +3,9 @@ using Microsoft.OpenApi.Models;
 using PipelineHealthMonitor.Data;
 using PipelineHealthMonitor.Middleware;
 
+// Load .env file into environment variables before building configuration
+DotNetEnv.Env.Load();
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ── 1. Register Controllers ──────────────────────────────────────────────────
