@@ -9,6 +9,9 @@
 **/appsettings.Development.json
 *.user
 
+# Environment secrets — never commit
+**/.env
+
 # IDE
 .vs/
 .vscode/
