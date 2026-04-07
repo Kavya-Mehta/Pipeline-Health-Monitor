@@ -1,0 +1,17 @@
+# Claude Code local settings (auto-generated, not part of the project)
+.claude/
+
+# .NET build output
+**/bin/
+**/obj/
+
+# User secrets and local overrides
+**/appsettings.Development.json
+*.user
+
+# IDE
+.vs/
+.vscode/
+
+# Visual Studio solution file
+*.sln

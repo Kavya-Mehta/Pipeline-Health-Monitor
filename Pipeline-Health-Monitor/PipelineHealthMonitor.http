@@ -1,0 +1,6 @@
+@PipelineHealthMonitor_HostAddress = http://localhost:5288
+
+GET {{PipelineHealthMonitor_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
