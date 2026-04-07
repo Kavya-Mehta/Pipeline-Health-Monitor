@@ -6,7 +6,7 @@
 
 ## Why this exists
 
-Managing data pipelines manually means checking logs, querying run tables, and piecing together whether something failed — after the fact. This API centralizes that. Every pipeline run gets logged on open, closed with counts on completion, and is immediately queryable by status, date, or pipeline name. A single `/health` endpoint gives you the full picture at a glance.
+Managing data pipelines manually means checking logs, querying run tables, and piecing together whether something failed after the fact. This API centralizes that. Every pipeline run gets logged on open, closed with counts on completion, and is immediately queryable by status, date, or pipeline name. A single `/health` endpoint gives you the full picture at a glance.
 
 ---
 
