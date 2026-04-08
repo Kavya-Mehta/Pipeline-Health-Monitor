@@ -1,28 +1,21 @@
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using PipelineHealthMonitor.Data;
+﻿using Microsoft.AspNetCore.Mvc;
 using PipelineHealthMonitor.DTOs;
+using PipelineHealthMonitor.Interfaces;
 using PipelineHealthMonitor.Models;
 
 namespace PipelineHealthMonitor.Controllers;
 
-/// <summary>
-/// Manages Pipeline definitions (the "what" — not the "runs").
-/// These are not in the original 5 required endpoints but are needed
-/// to create pipelines before you can start runs against them.
-/// </summary>
 [ApiController]
 [Route("pipelines")]
 public class PipelinesController : ControllerBase
 {
-    private readonly AppDbContext _db;
+    private readonly IUnitOfWork _uow;
 
-    public PipelinesController(AppDbContext db)
+    public PipelinesController(IUnitOfWork uow)
     {
-        _db = db;
+        _uow = uow;
     }
 
-    // POST /pipelines — create a new pipeline definition
     [HttpPost]
     [ProducesResponseType(typeof(PipelineResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -37,32 +30,26 @@ public class PipelinesController : ControllerBase
             CreatedAt    = DateTime.UtcNow
         };
 
-        _db.Pipelines.Add(pipeline);
-        await _db.SaveChangesAsync();
+        _uow.Pipelines.Add(pipeline);
+        await _uow.CommitAsync();
 
         return CreatedAtAction(nameof(GetPipeline), new { id = pipeline.Id }, MapToResponse(pipeline));
     }
 
-    // GET /pipelines — list all pipeline definitions
     [HttpGet]
     [ProducesResponseType(typeof(List<PipelineResponse>), StatusCodes.Status200OK)]
     public async Task<IActionResult> ListPipelines()
     {
-        var pipelines = await _db.Pipelines
-            .OrderBy(p => p.Name)
-            .Select(p => MapToResponse(p))
-            .ToListAsync();
-
-        return Ok(pipelines);
+        var pipelines = await _uow.Pipelines.GetAllAsync();
+        return Ok(pipelines.Select(MapToResponse).ToList());
     }
 
-    // GET /pipelines/{id} — get a single pipeline
     [HttpGet("{id}")]
     [ProducesResponseType(typeof(PipelineResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> GetPipeline(int id)
     {
-        var pipeline = await _db.Pipelines.FindAsync(id);
+        var pipeline = await _uow.Pipelines.FindByIdAsync(id);
         if (pipeline is null)
             return NotFound(new { error = $"Pipeline with id {id} not found." });
 
