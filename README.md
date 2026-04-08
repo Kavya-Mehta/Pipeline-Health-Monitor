@@ -1,288 +1,176 @@
 # Pipeline Health Monitor API
 
-> A REST API built with C# and ASP.NET Core 8 that tracks the health of data pipelines — logs every run, monitors record throughput, surfaces error rates, and exposes queryable endpoints for downstream consumers.
+> A production-grade REST API built with C# and ASP.NET Core 8 that tracks the health of data pipelines.
 
 ---
 
 ## Why this exists
 
-Managing data pipelines manually means checking logs, querying run tables, and piecing together whether something failed — after the fact. This API centralizes that. Every pipeline run gets logged on open, closed with counts on completion, and is immediately queryable by status, date, or pipeline name. A single `/health` endpoint gives you the full picture at a glance.
+Managing data pipelines manually means checking logs and piecing together whether something failed after the fact. This API centralizes that. Every pipeline run gets logged on open, closed with counts on completion, and is queryable by status, date, or pipeline. A background worker proactively detects stuck runs, stale pipelines, and volume anomalies automatically.
 
 ---
 
 ## Tech stack
 
-| Layer     | Technology                         |
-| --------- | ---------------------------------- |
-| Framework | ASP.NET Core 8 Web API             |
-| Language  | C# 12                              |
-| ORM       | Entity Framework Core 8            |
-| Database  | SQL Server                         |
-| Docs      | Swagger / OpenAPI (auto-generated) |
-| Auth      | API key via `X-Api-Key` header     |
+| Layer           | Technology                           |
+| --------------- | ------------------------------------ |
+| Framework       | ASP.NET Core 8 Web API               |
+| Language        | C# 12                                |
+| ORM             | Entity Framework Core 8              |
+| Database        | SQL Server                           |
+| Architecture    | Repository Pattern + Unit of Work    |
+| Background Jobs | BackgroundService (3 detection jobs) |
+| Testing         | xUnit + Moq (8 unit tests)           |
+| Logging         | Serilog (Console + Seq sinks)        |
+| Docs            | Swagger / OpenAPI (auto-generated)   |
+| Auth            | API key via X-Api-Key header         |
 
 ---
 
 ## Endpoints
 
-### `POST /pipelines/runs`
+### Pipeline definitions
 
-Opens a new pipeline run. Returns the run ID so the caller can close it when done.
+| Method | Path            | Description                  |
+| ------ | --------------- | ---------------------------- |
+| POST   | /pipelines      | Create a pipeline definition |
+| GET    | /pipelines      | List all pipelines           |
+| GET    | /pipelines/{id} | Get a single pipeline        |
 
-**Request:**
+### Pipeline runs
 
-```json
-{
-  "pipelineId": 1,
-  "triggeredBy": "scheduler"
-}
-```
+| Method | Path                          | Description                       |
+| ------ | ----------------------------- | --------------------------------- |
+| POST   | /pipelines/runs               | Open a new run (status: RUNNING)  |
+| PATCH  | /pipelines/runs/{id}/complete | Close a run with counts + errors  |
+| GET    | /pipelines/runs               | List runs (filterable, paginated) |
+| GET    | /pipelines/runs/{id}          | Full run detail with errors       |
+| GET    | /pipelines/health             | Aggregated health snapshot        |
 
-**Response `201`:**
+**GET /pipelines/runs query parameters:**
 
-```json
-{
-  "id": 42,
-  "status": "RUNNING",
-  "startedAt": "2025-01-15T10:00:00Z"
-}
-```
+| Parameter  | Example        | Description             |
+| ---------- | -------------- | ----------------------- |
+| pipelineId | ?pipelineId=1  | Filter by pipeline ID   |
+| status     | ?status=FAILED | Filter by status        |
+| page       | ?page=2        | Page number (default 1) |
+| pageSize   | ?pageSize=10   | Per page, max 100       |
 
----
-
-### `PATCH /pipelines/runs/{id}/complete`
-
-Closes a run with final record counts and any errors that occurred.
-
-**Request:**
-
-```json
-{
-  "status": "PARTIAL",
-  "recordsRead": 50000,
-  "recordsWritten": 49650,
-  "recordsFailed": 350,
-  "errors": [
-    {
-      "errorCode": "SCHEMA_MISMATCH",
-      "errorMessage": "Column 'order_date' expected INT, received VARCHAR",
-      "severity": "CRITICAL"
-    }
-  ]
-}
-```
+**overallHealth** values in GET /pipelines/health:
+- CRITICAL: any FAILED run in the last 24 hours
+- DEGRADED: any PARTIAL run but no FAILED in the last 24 hours
+- HEALTHY: no failures or partials in the last 24 hours
 
 ---
 
-### `GET /pipelines/runs`
+## Background worker
 
-List all runs. Supports query filters:
+The PipelineMonitorWorker runs every 60 seconds and performs three detection jobs:
 
-| Parameter      | Example                | Description                   |
-| -------------- | ---------------------- | ----------------------------- |
-| `status`       | `?status=FAILED`       | Filter by run status          |
-| `pipelineName` | `?pipelineName=orders` | Filter by pipeline name       |
-| `from`         | `?from=2025-01-01`     | Runs started after this date  |
-| `to`           | `?to=2025-01-31`       | Runs started before this date |
+| Job                      | What it detects                         | Action                                       |
+| ------------------------ | --------------------------------------- | -------------------------------------------- |
+| Stuck run detection      | RUNNING runs past the timeout threshold | Auto-marks FAILED, inserts RUN_TIMEOUT error |
+| Stale pipeline detection | Pipelines with no runs in X hours       | Logs STALE_PIPELINE warning                  |
+| Volume anomaly detection | Failure rate spike vs last 5 runs       | Logs VOLUME_ANOMALY warning                  |
 
----
-
-### `GET /pipelines/runs/{id}`
-
-Full detail for a single run including all associated errors.
-
-**Response:**
-
-```json
-{
-  "id": 42,
-  "pipelineName": "orders-to-warehouse",
-  "status": "PARTIAL",
-  "recordsRead": 50000,
-  "recordsWritten": 49650,
-  "recordsFailed": 350,
-  "errorRate": 0.7,
-  "durationSeconds": 142.3,
-  "errors": [
-    {
-      "errorCode": "SCHEMA_MISMATCH",
-      "severity": "CRITICAL",
-      "occurredAt": "2025-01-15T10:02:22Z"
-    }
-  ]
-}
-```
+All thresholds are configurable in appsettings.json under the Monitor section.
 
 ---
 
-### `GET /pipelines/health`
+## Structured logging (Serilog)
 
-Aggregated health summary across all completed runs.
+All log output goes through [Serilog](https://serilog.net/) instead of the default .NET logger. Serilog writes structured JSON events rather than flat strings, so every log entry carries named properties you can filter and query.
 
-**Response:**
+### Sinks
 
-```json
-{
-  "totalRuns": 120,
-  "successCount": 111,
-  "failedCount": 9,
-  "successRate": 92.5,
-  "avgRecordsPerRun": 48230,
-  "avgErrorRate": 0.72,
-  "lastError": {
-    "runId": 119,
-    "pipelineName": "orders-to-warehouse",
-    "errorCode": "TIMEOUT",
-    "errorMessage": "Upstream connection timed out after 30s",
-    "occurredAt": "2025-01-14T22:11:05Z"
-  }
-}
-```
+| Sink    | Output                                    |
+| ------- | ----------------------------------------- |
+| Console | Formatted text to terminal during dev     |
+| Seq     | Structured events to http://localhost:5341 |
+
+### What gets logged automatically
+
+- Every HTTP request: method, path, status code, and elapsed ms via `UseSerilogRequestLogging`
+- Worker events: stuck runs detected, stale pipelines, volume anomalies
+- Startup and shutdown events
+- All log entries carry: `Application`, `MachineName`, `ThreadId`, and request context fields
+
+### Running Seq locally
+
+Download from https://datalust.co/seq — free for single-user dev. After install, open http://localhost:5341 to search and filter structured logs with full-text queries like `@Level = 'Warning'` or `PipelineId = 3`.
+
+### Configuration
+
+Serilog is configured in `appsettings.json` under the `Serilog` key. Minimum levels, sinks, and enrichers are all set there — no code changes needed to adjust log verbosity.
 
 ---
 
 ## Database schema
 
-```
-pipelines
-─────────────────────────────
-id              INT PK
-name            VARCHAR(200) UNIQUE
-source_system   VARCHAR(100)
-sink_system     VARCHAR(100)
-description     VARCHAR (nullable)
-created_at      DATETIME
+### pipelines
 
+| Column     | Type         | Notes              |
+| ---------- | ------------ | ------------------ |
+| id         | int          | PK, identity       |
+| name       | varchar(200) | unique, not null   |
+| created_at | datetime2    | set on insert      |
 
-pipeline_runs
-─────────────────────────────
-id              INT PK
-pipeline_id     INT FK → pipelines.id
-started_at      DATETIME
-ended_at        DATETIME (nullable)
-status          VARCHAR  CHECK: RUNNING | SUCCESS | FAILED | PARTIAL
-records_read    INT
-records_written INT
-records_failed  INT
-triggered_by    VARCHAR (nullable)
+### pipeline_runs
 
+| Column          | Type         | Notes                            |
+| --------------- | ------------ | -------------------------------- |
+| id              | int          | PK, identity                     |
+| pipeline_id     | int          | FK to pipelines                  |
+| status          | varchar(20)  | CHECK: RUNNING/SUCCESS/FAILED/PARTIAL |
+| started_at      | datetime2    |                                  |
+| completed_at    | datetime2    | nullable                         |
+| records_read    | int          | nullable                         |
+| records_written | int          | nullable                         |
+| records_failed  | int          | nullable                         |
+| error_rate      | computed     | records_failed / records_read (C#) |
 
-run_errors
-─────────────────────────────
-id              INT PK
-run_id          INT FK → pipeline_runs.id
-error_code      VARCHAR(100)
-error_message   TEXT
-severity        VARCHAR  CHECK: INFO | WARNING | CRITICAL
-occurred_at     DATETIME
-```
+### run_errors
 
----
-
-## Project structure
-
-```
-PipelineHealthMonitor/
-├── Controllers/
-│   └── PipelineRunsController.cs     # All 5 endpoints
-├── Data/
-│   └── AppDbContext.cs               # EF Core config, constraints, indexes
-├── DTOs/
-│   └── RunDtos.cs                    # Request/response shapes (C# records)
-├── Models/
-│   ├── Pipeline.cs                   # Pipeline entity
-│   ├── PipelineRun.cs                # Run entity with computed ErrorRate/Duration
-│   └── RunError.cs                   # Error entity
-├── Migrations/                       # Auto-generated by EF Core
-├── Program.cs                        # App bootstrap, middleware, DI
-├── appsettings.json                  # Connection string (no secrets)
-├── .env                              # API key secret — git-ignored, never committed
-├── .env.example                      # Safe template showing required keys
-└── PipelineHealthMonitor.csproj      # Package references
-swagger.json                          # OpenAPI spec (exported from /swagger/v1/swagger.json)
-```
-
----
-
-## Getting started
-
-### Prerequisites
-
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- SQL Server or SQL Server Express / LocalDB
-
-### Setup
-
-```bash
-# 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/pipeline-health-monitor.git
-cd pipeline-health-monitor
-
-# 2. Install EF Core tools (once, globally)
-dotnet tool install --global dotnet-ef
-
-# 3. Restore packages
-dotnet restore
-
-# 4. Create your local .env file from the example and set your API key
-cp PipelineHealthMonitor/.env.example PipelineHealthMonitor/.env
-# Then edit .env and replace the placeholder with your actual key
-
-# 5. Update the connection string in appsettings.json if needed
-#    (see Configuration section below)
-
-# 6. Create and apply the database migration
-dotnet ef migrations add InitialCreate
-dotnet ef database update
-
-# 7. Run the API
-dotnet run
-```
-
-Swagger UI is available at: `https://localhost:{port}/swagger`
-
----
-
-## OpenAPI spec
-
-A static export of the OpenAPI specification is committed as `swagger.json` at the repo root. You can import it directly into Postman, Insomnia, or any OpenAPI-compatible tool without running the app.
-
-To regenerate it after making endpoint changes:
-
-```bash
-# Start the API, then export the live spec
-curl http://localhost:5288/swagger/v1/swagger.json -o swagger.json
-```
-
-The live interactive docs (Swagger UI) are served at `/swagger` while the app is running.
+| Column     | Type         | Notes              |
+| ---------- | ------------ | ------------------ |
+| id         | int          | PK, identity       |
+| run_id     | int          | FK to pipeline_runs |
+| error_code | varchar(100) |                    |
+| message    | varchar(2000)|                    |
+| occurred_at| datetime2    |                    |
 
 ---
 
 ## Configuration
 
-**Connection string** — update `appsettings.json` if your SQL Server instance differs:
+**appsettings.json structure:**
 
 ```json
 {
+  "Serilog": {
+    "MinimumLevel": { "Default": "Information" },
+    "WriteTo": [
+      { "Name": "Console" },
+      { "Name": "Seq", "Args": { "serverUrl": "http://localhost:5341" } }
+    ]
+  },
   "ConnectionStrings": {
-    "DefaultConnection": "Server=localhost\\SQLEXPRESS;Database=PipelineHealthMonitorDb;Trusted_Connection=True;TrustServerCertificate=True;"
+    "DefaultConnection": "Server=localhost\\SQLEXPRESS;Database=PipelineHealthMonitorDb;Trusted_Connection=True;"
+  },
+  "Monitor": {
+    "IntervalSeconds": 60,
+    "StuckRunTimeoutMinutes": 60,
+    "StalePipelineHours": 24,
+    "VolumeAnomalyThreshold": 0.5
   }
 }
 ```
 
-**LocalDB connection string:**
+**API key** in `.env` (never commit this):
 
 ```
-Server=(localdb)\mssqllocaldb;Database=PipelineHealthMonitor;Trusted_Connection=True;
+API_KEY=your-secret-key-here
 ```
-
-**API key** — set in `PipelineHealthMonitor/.env` (never in `appsettings.json`):
-
-```
-ApiKey=your-secret-api-key-here
-```
-
-Copy `.env.example` to `.env` and replace the placeholder. The `.env` file is git-ignored and will never be committed.
 
 ---
 
@@ -291,34 +179,36 @@ Copy `.env.example` to `.env` and replace the placeholder. The `.env` file is gi
 All endpoints require the `X-Api-Key` header:
 
 ```
-X-Api-Key: your-secret-api-key-here
+X-Api-Key: your-secret-key-here
 ```
 
-The key is loaded from the `.env` file at startup via `DotNetEnv`. In production, inject it as an environment variable or use a secrets manager — never hardcode it in source control.
-
-In the Swagger UI, click **Authorize** at the top right and enter your key there to authenticate all requests.
+The key is loaded from `.env` at startup via DotNetEnv. In production use an environment variable or secrets manager.
+In Swagger UI, click Authorize and enter your key to authenticate all requests.
 
 ---
 
 ## Design decisions
 
-**`status` is a varchar with a CHECK constraint, not a DB enum**
-CHECK constraints are more portable across SQL Server and PostgreSQL and can be extended without a schema migration that alters an enum type definition. A common trade-off in production systems.
+**Repository Pattern + Unit of Work**
+Controllers depend on IUnitOfWork, not AppDbContext directly. This decouples HTTP logic from database logic, makes every data access method named and intentional, and enables unit testing with mocks. CommitAsync() is the single transaction commit point per request.
 
-**`run_errors` is a separate table, not a JSON column**
-Separate rows let you query errors independently — "show all runs with SCHEMA_MISMATCH errors in the last 7 days" is a clean indexed query. JSON parsing inside a WHERE clause is messy and unindexable.
+**BackgroundService uses IServiceScopeFactory**
+The worker is a singleton. IUnitOfWork is scoped. Injecting a scoped service into a singleton would exhaust the DB connection pool. The factory creates a fresh scope per tick, resolves IUnitOfWork, does the work, and disposes the scope.
 
-**`error_rate` is computed in C#, not stored**
-Derived from `records_failed / records_read`. Storing it would create a consistency risk if counts are updated. The denominator guard (`RecordsRead > 0`) lives in exactly one place.
+**Serilog replaces the default .NET logger**
+Default .NET logging writes unstructured strings. Serilog writes structured events with named properties. This means logs are queryable — you can filter by PipelineId or RunId in Seq rather than grepping strings.
+
+**status is a varchar with a CHECK constraint, not a DB enum**
+CHECK constraints are more portable across SQL Server and PostgreSQL and can be extended without a schema migration.
+
+**run_errors is a separate table, not a JSON column**
+Separate rows allow clean indexed queries. JSON inside a WHERE clause is unindexable.
+
+**error_rate is computed in C#, not stored**
+Derived from records_failed / records_read. Storing it creates a consistency risk if counts are updated.
 
 **POST to open, PATCH to complete**
-Real pipelines run asynchronously — the process that opens a run isn't always the one that closes it. Splitting the lifecycle into two calls mirrors how monitoring agents actually work.
-
----
-
-## Connecting to real pipeline work
-
-This project is a direct extension of pipeline monitoring done manually in a previous data engineering role — tracking run status, record counts, and failure rates across ETL pipelines loading data into a warehouse. This API formalizes that observability into a queryable, documented service.
+Real pipelines run asynchronously. The process that opens a run is not always the one that closes it.
 
 ---
 
