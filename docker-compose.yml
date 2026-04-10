@@ -1,0 +1,66 @@
+services:
+
+  # ── Your API ────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .          # build context = this folder (where Dockerfile lives)
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"       # host:container — reach the API at http://localhost:8080
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      # In Docker, services talk to each other by their service name, not "localhost".
+      # "sqlserver", "seq", "jaeger" below are the service names defined in this file.
+      ConnectionStrings__DefaultConnection: >
+        Server=sqlserver;Database=PipelineHealthMonitorDb;
+        User Id=sa;Password=Pipeline@2024!;TrustServerCertificate=True;
+      ApiKey: pipeline-monitor-secret-key-2024
+      OpenTelemetry__OtlpEndpoint: http://jaeger:4317
+      # Override the Seq URL (index 1 in the WriteTo array) to use the container hostname.
+      Serilog__WriteTo__1__Args__serverUrl: http://seq:5341
+    depends_on:
+      - sqlserver
+      - seq
+      - jaeger
+    # If the API starts before SQL Server is ready, Docker will restart it automatically.
+    restart: unless-stopped
+
+  # ── SQL Server ──────────────────────────────────────────────────────────────
+  # This replaces your local SQL Server Express install.
+  # Data is persisted in the "sqldata" volume so it survives container restarts.
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      SA_PASSWORD: "Pipeline@2024!"
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: Express
+    ports:
+      - "1433:1433"       # you can still connect from SSMS using localhost,1433
+    volumes:
+      - sqldata:/var/opt/mssql
+    restart: unless-stopped
+
+  # ── Seq ─────────────────────────────────────────────────────────────────────
+  # Structured log viewer. Open http://localhost:8081 to search your logs.
+  seq:
+    image: datalust/seq:latest
+    environment:
+      ACCEPT_EULA: "Y"
+    ports:
+      - "5341:5341"       # ingest port (your app sends logs here)
+      - "8081:80"         # UI port (open in browser)
+    restart: unless-stopped
+
+  # ── Jaeger ──────────────────────────────────────────────────────────────────
+  # Distributed trace viewer. Open http://localhost:16686 to see traces.
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    ports:
+      - "4317:4317"       # OTLP gRPC (your app sends traces here)
+      - "16686:16686"     # UI port (open in browser)
+    restart: unless-stopped
+
+# Named volume — Docker manages this disk space.
+# Your SQL Server data persists even when containers are stopped or rebuilt.
+volumes:
+  sqldata:
